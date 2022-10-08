@@ -1,0 +1,324 @@
+1 В каких городах больше одного аэропорта?
+--Группирую города, считаю количество аэропортов в каждом городе и фильтрую полученные данные
+
+-- стоимость запроса 4.82
+--explain analyze
+select 
+    city as Город, 
+    count(airport_code) as "Кол-во_аэропортов"
+from airports
+group by city
+having count(airport_code)>1
+
+--стоимость запроса 9.99
+--explain analyze
+select city
+from
+    (select 
+     city,
+     airport_code,
+     row_number() over(partition by city order by airport_code) 
+     from airports) as rin
+where "row_number" > 1
+group by city
+
+
+2 В каких аэропортах есть рейсы, выполняемые самолетом с максимальной дальностью перелета?
+- Подзапрос
+
+Соединяем таблицы flights (в которой содержаться нужная нам информация о коде самолетов (aircraft_code)) 
+и airports (в которой содержится информация о названии аэропортов) и фильтрум данные по коду самолета с максимальной
+дальностью перелета, который мы находим с помощью подзапроса.
+
+--стоимость запроса 835.29
+--explain analyze     
+select distinct 
+      a.airport_name as "название_аэропорта"
+from airports a
+inner join flights f on f.departure_airport = a.airport_code
+where f.aircraft_code = (select aircraft_code
+                         from aircrafts
+                         where "range" = (select max("range")      
+                                              from aircrafts))
+ 
+
+--стоимость запроса 834.19                                             
+--explain analyze                                                
+select distinct 
+	 a.airport_name "название_аэропорта"
+from airports a  
+inner join flights f on f.departure_airport = a.airport_code 
+where f.aircraft_code = (select a.aircraft_code 
+	                     from aircrafts a 
+	                     order by a."range" desc limit 1)
+
+
+3  Вывести 10 рейсов с максимальным временем задержки вылета
+   - Оператор LIMIT
+
+Вычисляем время задержки рейса(из фактического времени отправления(actual_departure) вычитаем планируемое (scheduled_departure)
+фильтрует значения null , сортируем таблицу по времени задержки рейса от больше к меньшему и ограничиваем количество записей
+
+--стоимость запроса 1127.05
+--explain analyze
+select 
+     flight_id, 
+     flight_no,
+     actual_departure- scheduled_departure as Время_задержки_рейса
+from flights
+where actual_departure  is not null
+order by Время_задержки_рейса desc
+limit 10
+
+4 Были ли брони, по которым не были получены посадочные талоны?
+   - Верный тип JOIN
+
+Нужно взять все бронирования из таблицы bookings, обогатить данные с помощью таблицы tickets чтобы присоединить таблицу boarding_passes,
+в которой содержиться информация о посадочных талонах. Ипользовать нужно left join, так как нам нужны номера всех бронирований и чтобы они 
+не потерись при соединении таблиц. 
+Были ли брони, по которым не были получены посадочные талоны можно выяснить несколькими способами:
+
+
+--стоимость запроса 35569
+--explain analyze
+select b.book_ref , bp.boarding_no
+from bookings b
+left join tickets t on t.book_ref = b.book_ref
+left join boarding_passes bp on bp.ticket_no= t.ticket_no
+where bp.boarding_no is null
+
+получаем в столбце значения null, значит по данному бронированию посадочный талон не был получен
+
+
+Для наглядности количество полученных и не полученных посадочных талонов можем посмотреть например через оконную функцию
+
+--стоимость запроса 96287
+--explain analyze
+select 
+      b.book_ref , 
+      bp.boarding_no,
+      count(bp.boarding_no) over () as "Получено посад.талонов(кол-во)",
+      (select count(b.book_ref)
+           from bookings b
+           left join tickets t on t.book_ref = b.book_ref
+           left join boarding_passes bp on bp.ticket_no= t.ticket_no
+           where bp.boarding_no is null) as "Не получено посад. талонов(кол-во)"
+from bookings b
+left join tickets t on t.book_ref = b.book_ref
+left join boarding_passes bp on bp.ticket_no= t.ticket_no
+
+
+5  Найдите количество свободных мест для каждого рейса, их % отношение к общему количеству мест в самолете.
+   Добавьте столбец с накопительным итогом - суммарное накопление количества вывезенных пассажиров из каждого аэропорта на каждый день. Т.е. в этом столбце должна отражаться накопительная сумма - сколько человек уже вылетело из данного аэропорта на этом или более ранних рейсах в течении дня.
+   - Оконная функция
+   - Подзапросы или/и cte
+
+Создадим два cte. В одном посчитаем вместимость каждого самолета в другом фактическое количество вылетевших пассажиров.
+Объединим таблицы, посчитаем количество свободных мест(вместимость самолета минус фактическое кол-во пассажиров) 
+и их процентное соотношение к общему количеству мест в самолете
+и с помощью оконной функции посчитем нарастающий итог. 
+
+--стоимость запроса 13620552
+--explain analyse
+with max_cap as(select a.aircraft_code,
+               a.model,
+               count(s.seat_no) as max_cap
+               from aircrafts a
+               inner join seats s on s.aircraft_code = a.aircraft_code
+               group by a.aircraft_code ,a.model),
+  fact_seats as (select flight_id, count(boarding_no) as fact_seats
+                 from boarding_passes
+                 group by flight_id)
+select f.flight_id,
+       f.departure_airport,
+       m.max_cap,
+       a.model,
+       fas.fact_seats,
+       m.max_cap - fas.fact_seats as free_seats,
+       (m.max_cap - fas.fact_seats)*100/m.max_cap as free_seats_percent,
+       f.actual_departure::date,
+       sum(fas.fact_seats) over (partition by f.departure_airport,f.actual_departure::date order by f.actual_departure) as count_day_airport
+from boarding_passes bp
+inner join ticket_flights tf on bp.ticket_no = tf.ticket_no and bp.flight_id = tf.flight_id
+inner join flights f on tf.flight_id = f.flight_id
+inner join aircrafts a on a.aircraft_code = f.aircraft_code
+inner join seats s on s.aircraft_code = a.aircraft_code
+inner join max_cap m on m.aircraft_code = f.aircraft_code
+inner join fact_seats fas on fas.flight_id = f.flight_id
+where actual_departure is not null
+group by f.flight_id,m.max_cap,fas.fact_seats,a.model
+
+мы видим что запрос выполняется медленно и поэтому ускорим его, объединив необходимые таблицы в cte в которой мы считали
+фактическое количество пассажиров 
+
+--стоимость запроса 14044
+--explain analyse 
+with max_cap as(select a.aircraft_code,
+                       a.model,
+                       count(s.seat_no) as max_cap
+                       from aircrafts a
+               inner join seats s on s.aircraft_code = a.aircraft_code
+               group by a.aircraft_code ,a.model),
+fact_seats as (select 
+		      f.flight_id,
+		      f.flight_no,
+		      f.aircraft_code,
+		      f.departure_airport,
+		      f.scheduled_departure,
+		      f.actual_departure,
+		      count(bp.boarding_no)as fact_seats
+	    from flights f 
+	    join boarding_passes bp on bp.flight_id = f.flight_id 
+	    where f.actual_departure is not null
+	    group by f.flight_id)
+select fas.flight_id,
+       fas.departure_airport,
+       m.max_cap,
+       m.model,
+       fas.fact_seats,
+       m.max_cap - fas.fact_seats as free_seats,
+       (m.max_cap - fas.fact_seats)*100/m.max_cap as free_seats_percent,
+       fas.actual_departure::date,
+       sum(fas.fact_seats) over (partition by fas.departure_airport,fas.actual_departure::date 
+       order by fas.actual_departure) as count_day_airport
+from fact_seats fas
+inner join max_cap m on m.aircraft_code = fas.aircraft_code
+
+
+6 Найдите процентное соотношение перелетов по типам самолетов от общего количества.
+- Подзапрос или окно
+- Оператор ROUND
+Создадим cte где посчитаем общее количество вылетов(с помощью подзапроса) и количество вылетов для каждой модели
+самолета(с помощью функции). Затем
+присоединим таблицу с моделями самолетов и выведем необходимые колонки 
+и добавим колонку с расчетом процентов совершенных вылетов для каждого самолета
+
+with cte as (select aircraft_code,
+      count(flight_id) as aircraft_flight,
+      (select count(flight_id) from flights) as all_flight
+from flights
+group by aircraft_code)
+select a.model,
+       c.all_flight,
+       c.aircraft_flight,
+       round((c.aircraft_flight::dec*100/c.all_flight::dec),2) as percent_flight
+from cte c
+inner join aircrafts a on a.aircraft_code = c.aircraft_code
+
+
+7 Были ли города, в которые можно  добраться бизнес - классом дешевле, чем эконом-классом в рамках перелета?
+- CTE
+
+Создаем два cte, в одном находим значения по каждому перелету класса эконом, 
+в другом находим значения по каждому перелету класса бизнес,
+соединяем таблицы с таблицей с названиями аэропорта и сравниваем значения.
+В итоге мы получаем пустой результат, значит таких перелетов не было 
+
+
+with econom as (
+           select
+           flight_id,
+           fare_conditions,
+           amount as econom_amount
+           from ticket_flights
+           where fare_conditions = 'Economy'),
+     business as (
+           select
+           flight_id,
+           fare_conditions,
+           amount as business_amount
+           from ticket_flights
+           where fare_conditions = 'Business')
+select distinct
+       f.flight_id,
+       arrival_airport,
+       a.city,
+       e.econom_amount,
+       b.business_amount
+from flights f
+join airports a on a.airport_code = f.arrival_airport
+join econom e on e.flight_id = f.flight_id
+join business b on b.flight_id = f.flight_id
+where b.business_amount < e.econom_amount
+
+
+
+8 Между какими городами нет прямых рейсов?
+- Декартово произведение в предложении FROM
+- Самостоятельно созданные представления (если облачное подключение, то без представления)
+- Оператор EXCEPT
+
+Создаю представление:соединяю таблицы flights и airports, получаю уникальные пары городов между которыми есть прямые рейсы.
+Создаю таблицу с помощью декартова соединения(cross join) таблицы airports, получаю всевозможные уникальные пары городов
+и фильтую их чтобы город в первом столбце не был равен городу во втором столбце.
+Затем с помощью оператора except вычитаю из всевозможных пар ,которые я ранее получил, пары городов из созданного мной представления
+и получаю города между которыми нет прямых рейсов 
+
+
+create view flights_city as
+select distinct 
+	a1.city as  город_вылета,
+	a2.city as город_прилета
+from flights f 
+inner join airports a1 on f.departure_airport = a1.airport_code 
+inner join airports a2 on f.arrival_airport = a2.airport_code
+
+
+--стоимость запроса 2014
+--explain analyse
+select distinct
+       a1.city,
+       a2.city
+from airports a1
+cross join airports a2
+where a1.city != a2.city
+except 
+select * from flights_city
+
+9
+Вычислите расстояние между аэропортами, связанными прямыми рейсами, сравните с допустимой максимальной дальностью перелетов  в самолетах, обслуживающих эти рейсы *
+- Оператор RADIANS или использование sind/cosd
+- CASE 
+
+Соединяем таблицы flights, airports, aircrafts так как в них содержаться интересующие нас значения.
+Выбираем нужные столбцы и расчитывает расстояние по указанной формуле:
+d = arccos {sin(latitude_a)·sin(latitude_b) + cos(latitude_a)·cos(latitude_b)·cos(longitude_a - longitude_b)},
+где latitude_a и latitude_b — широты, longitude_a,
+longitude_b — долготы данных пунктов, d — расстояние между пунктами измеряется в радианах длиной дуги большого круга земного шара.
+Расстояние между пунктами, измеряемое в километрах, определяется по формуле:
+L = d·R, где R = 6371 км — средний радиус земного шара.
+Затем с помощью оператора case выведем информацию о безопасности полета.Расчеты очень грубые и не отражают реальной ситуации,
+так как для каждого рейса, для каждого самолета запас топлива различен и влияют такие факторы как погодные условия, высота полета,
+нагруженность самолета и т.д. 
+У самолетов совершающих полет, должно быть в запасе 15% процентов топлива на непредвиденные ситуации, мы же возьмем 15% от 
+максимальной дальности перелета.
+Если дальность перелета меньше 85% от максимальной дальности самолета, то отобразим что перелет безопасен,
+если нет, то отобразим что это предельная нагрузка на самолет.
+
+
+--стоимость запроса 33121
+--explain analyse
+select distinct
+       a.airport_name as departure_airport_name,
+       a1.airport_name as arrival_airport_name,
+       a2.aircraft_code,
+       a2.model,
+       a2."range",
+       round((acos(sind(a.latitude) * sind(a1.latitude) 
+       + cosd(a.latitude) * cosd(a1.latitude) 
+       * cosd(a.longitude - a1.longitude)) * 6371)::dec, 2)  as distance,
+       case 
+       	when a2."range"*100/(round((acos(sind(a.latitude) * sind(a1.latitude) 
+       + cosd(a.latitude) * cosd(a1.latitude) 
+       * cosd(a.longitude - a1.longitude)) * 6371)::dec, 2)) > '85' then 'безопасно'
+       else 'предельная нагрузка'
+       end as flight_safety
+from flights f
+inner join airports a on f.departure_airport = a.airport_code 
+inner join airports a1 on f.arrival_airport = a1.airport_code
+inner join aircrafts a2 on f.aircraft_code = a2.aircraft_code
+
+
+
+
+
